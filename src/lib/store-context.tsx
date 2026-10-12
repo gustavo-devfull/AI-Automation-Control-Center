@@ -8,60 +8,42 @@ import {
   useMemo,
   useState,
 } from "react";
-import type {
-  Agent,
-  AgentRun,
-  ApprovalRequest,
-  ControlCenterEvent,
-  CostEntry,
-  ErrorEvent as AgentErrorEvent,
-  PermissionGrant,
-  RetryEvent,
-  Tool,
-} from "@/lib/types";
+import type { CheckResult, Incident, MonitorEvent, MonitorSnapshot } from "@/lib/types";
+import { computeUptimeStats } from "@/lib/stats";
 
-interface Snapshot {
-  agents: Agent[];
-  tools: Tool[];
-  permissions: PermissionGrant[];
-  runs: AgentRun[];
-  approvals: ApprovalRequest[];
-  costs: CostEntry[];
-  errors: AgentErrorEvent[];
-  retries: RetryEvent[];
-}
+const MAX_CHECKS_CLIENT = 1500;
+const MAX_INCIDENTS_CLIENT = 200;
 
-interface ControlCenterState extends Snapshot {
+interface MonitorState extends MonitorSnapshot {
   connected: boolean;
   loading: boolean;
-  decideApproval: (id: string, decision: "approved" | "denied") => Promise<void>;
+  checkNow: () => Promise<void>;
+  checking: boolean;
 }
 
-const MAX_COSTS = 500;
-const MAX_ERRORS = 300;
-const MAX_RETRIES = 300;
+const MonitorContext = createContext<MonitorState | null>(null);
 
-const ControlCenterContext = createContext<ControlCenterState | null>(null);
+const EMPTY_SNAPSHOT: MonitorSnapshot = {
+  targetUrl: "",
+  checks: [],
+  incidents: [],
+  currentStatus: "unknown",
+  lastCheckedAt: null,
+  uptimePercent: { "24h": null, "7d": null, "30d": null },
+  avgLatencyMs: null,
+};
 
-export function ControlCenterProvider({ children }: { children: React.ReactNode }) {
-  const [snapshot, setSnapshot] = useState<Snapshot>({
-    agents: [],
-    tools: [],
-    permissions: [],
-    runs: [],
-    approvals: [],
-    costs: [],
-    errors: [],
-    retries: [],
-  });
+export function MonitorProvider({ children }: { children: React.ReactNode }) {
+  const [snapshot, setSnapshot] = useState<MonitorSnapshot>(EMPTY_SNAPSHOT);
   const [loading, setLoading] = useState(true);
   const [connected, setConnected] = useState(false);
+  const [checking, setChecking] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     fetch("/api/bootstrap")
       .then((r) => r.json())
-      .then((data: Snapshot) => {
+      .then((data: MonitorSnapshot) => {
         if (!cancelled) {
           setSnapshot(data);
           setLoading(false);
@@ -77,96 +59,68 @@ export function ControlCenterProvider({ children }: { children: React.ReactNode 
     source.onopen = () => setConnected(true);
     source.onerror = () => setConnected(false);
     source.onmessage = (event) => {
-      const parsed: ControlCenterEvent = JSON.parse(event.data);
+      const parsed: MonitorEvent = JSON.parse(event.data);
       applyEvent(parsed, setSnapshot);
     };
     return () => source.close();
   }, []);
 
-  const decideApproval = useCallback(
-    async (id: string, decision: "approved" | "denied") => {
-      await fetch(`/api/approvals/${id}/decide`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ decision, decidedBy: "You (operator)" }),
-      });
-    },
-    []
+  const checkNow = useCallback(async () => {
+    setChecking(true);
+    try {
+      await fetch("/api/check", { method: "POST" });
+    } finally {
+      setChecking(false);
+    }
+  }, []);
+
+  const value = useMemo<MonitorState>(
+    () => ({ ...snapshot, loading, connected, checkNow, checking }),
+    [snapshot, loading, connected, checkNow, checking]
   );
 
-  const value = useMemo<ControlCenterState>(
-    () => ({ ...snapshot, loading, connected, decideApproval }),
-    [snapshot, loading, connected, decideApproval]
-  );
-
-  return (
-    <ControlCenterContext.Provider value={value}>
-      {children}
-    </ControlCenterContext.Provider>
-  );
+  return <MonitorContext.Provider value={value}>{children}</MonitorContext.Provider>;
 }
 
 function applyEvent(
-  event: ControlCenterEvent,
-  setSnapshot: React.Dispatch<React.SetStateAction<Snapshot>>
+  event: MonitorEvent,
+  setSnapshot: React.Dispatch<React.SetStateAction<MonitorSnapshot>>
 ) {
   setSnapshot((prev) => {
     switch (event.type) {
-      case "run_created": {
-        const run = event.payload as AgentRun;
-        return { ...prev, runs: [run, ...prev.runs] };
-      }
-      case "run_updated": {
-        const run = event.payload as AgentRun;
+      case "check_added": {
+        const check = event.payload as CheckResult;
+        const checks = [...prev.checks, check].slice(-MAX_CHECKS_CLIENT);
         return {
           ...prev,
-          runs: prev.runs.map((r) => (r.id === run.id ? run : r)),
+          checks,
+          currentStatus: check.success ? "up" : "down",
+          lastCheckedAt: check.timestamp,
+          ...computeUptimeStats(checks),
         };
       }
-      case "cost_added": {
-        const cost = event.payload as CostEntry;
+      case "incident_opened": {
+        const incident = event.payload as Incident;
         return {
           ...prev,
-          costs: [...prev.costs, cost].slice(-MAX_COSTS),
+          incidents: [incident, ...prev.incidents].slice(0, MAX_INCIDENTS_CLIENT),
         };
       }
-      case "error_added": {
-        const error = event.payload as AgentErrorEvent;
+      case "incident_resolved": {
+        const incident = event.payload as Incident;
         return {
           ...prev,
-          errors: [error, ...prev.errors].slice(0, MAX_ERRORS),
+          incidents: prev.incidents.map((i) => (i.id === incident.id ? incident : i)),
         };
       }
-      case "retry_added": {
-        const retry = event.payload as RetryEvent;
-        return {
-          ...prev,
-          retries: [retry, ...prev.retries].slice(0, MAX_RETRIES),
-        };
-      }
-      case "approval_created": {
-        const approval = event.payload as ApprovalRequest;
-        return { ...prev, approvals: [approval, ...prev.approvals] };
-      }
-      case "approval_decided": {
-        const approval = event.payload as ApprovalRequest;
-        return {
-          ...prev,
-          approvals: prev.approvals.map((a) =>
-            a.id === approval.id ? approval : a
-          ),
-        };
-      }
-      case "log_added":
-        return prev; // logs handled by per-run hook, not global state
       default:
         return prev;
     }
   });
 }
 
-export function useControlCenter() {
-  const ctx = useContext(ControlCenterContext);
-  if (!ctx) throw new Error("useControlCenter must be used within ControlCenterProvider");
+export function useMonitor() {
+  const ctx = useContext(MonitorContext);
+  if (!ctx) throw new Error("useMonitor must be used within MonitorProvider");
   return ctx;
 }

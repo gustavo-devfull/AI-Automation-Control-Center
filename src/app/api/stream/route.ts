@@ -1,30 +1,28 @@
-import { getEngine } from "@/lib/engine";
-import type { ControlCenterEvent } from "@/lib/types";
+import { getMonitor } from "@/lib/monitor";
+import type { MonitorEvent } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET() {
-  const engine = getEngine();
+  const monitor = getMonitor();
   const encoder = new TextEncoder();
 
-  let onEvent: (event: ControlCenterEvent) => void;
+  let onEvent: (event: MonitorEvent) => void;
   let heartbeat: ReturnType<typeof setInterval>;
 
   const stream = new ReadableStream({
     start(controller) {
-      const send = (event: ControlCenterEvent) => {
+      const send = (event: MonitorEvent) => {
         try {
-          controller.enqueue(
-            encoder.encode(`data: ${JSON.stringify(event)}\n\n`)
-          );
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
         } catch {
           // controller already closed
         }
       };
 
       onEvent = send;
-      engine.emitter.on("event", onEvent);
+      monitor.emitter.on("event", onEvent);
 
       heartbeat = setInterval(() => {
         try {
@@ -37,7 +35,7 @@ export async function GET() {
       controller.enqueue(encoder.encode(`: connected\n\n`));
     },
     cancel() {
-      engine.emitter.off("event", onEvent);
+      monitor.emitter.off("event", onEvent);
       clearInterval(heartbeat);
     },
   });

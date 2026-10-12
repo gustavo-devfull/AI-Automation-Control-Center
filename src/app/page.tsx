@@ -1,162 +1,153 @@
 "use client";
 
+import { useMemo } from "react";
 import Link from "next/link";
 import {
-  Bar,
-  BarChart,
-  Cell,
-  Pie,
-  PieChart,
+  Area,
+  AreaChart,
+  CartesianGrid,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
-import { AlertTriangle, Clock, DollarSign, ShieldCheck } from "lucide-react";
-import { useControlCenter } from "@/lib/store-context";
-import { formatRelativeTime, formatUsd } from "@/lib/format";
+import { Activity, Clock, ExternalLink, RefreshCw, TrendingUp } from "lucide-react";
+import { useMonitor } from "@/lib/store-context";
+import { formatClockTime, formatDuration, formatRelativeTime } from "@/lib/format";
 import { Card, CardHeader, StatCard, Button, EmptyState } from "@/components/ui-primitives";
-import { StatusBadge, RiskBadge } from "@/components/badges";
+import { StatusBadge } from "@/components/badges";
 
-const STATUS_COLORS: Record<string, string> = {
-  queued: "#64748b",
-  running: "#38bdf8",
-  awaiting_approval: "#fbbf24",
-  retrying: "#fb923c",
-  succeeded: "#34d399",
-  failed: "#fb7185",
-  denied: "#fb7185",
-};
+function formatPercent(v: number | null): string {
+  if (v === null) return "—";
+  return `${v.toFixed(2)}%`;
+}
+
+function formatMs(v: number | null): string {
+  if (v === null) return "—";
+  return `${v}ms`;
+}
 
 export default function OverviewPage() {
-  const { runs, agents, approvals, costs, errors, decideApproval, loading } =
-    useControlCenter();
+  const { targetUrl, checks, incidents, currentStatus, lastCheckedAt, uptimePercent, avgLatencyMs, checkNow, checking, loading } =
+    useMonitor();
 
-  if (loading) {
-    return <EmptyState label="Loading control center…" />;
-  }
-
-  const activeRuns = runs.filter((r) =>
-    ["running", "retrying", "queued", "awaiting_approval"].includes(r.status)
+  const latencyData = useMemo(
+    () =>
+      checks.slice(-60).map((c) => ({
+        time: c.timestamp,
+        latency: c.latencyMs ?? 0,
+        success: c.success,
+      })),
+    [checks]
   );
-  const finished = runs.filter((r) => ["succeeded", "failed", "denied"].includes(r.status));
-  const successRate = finished.length
-    ? Math.round((finished.filter((r) => r.status === "succeeded").length / finished.length) * 100)
-    : 100;
-  const totalSpend = costs.reduce((sum, c) => sum + c.costUsd, 0);
-  const pendingApprovals = approvals.filter((a) => a.decision === "pending");
-  const recentErrors = errors.slice(0, 6);
 
-  const costByAgent = agents
-    .map((agent) => ({
-      name: agent.name.replace(" Agent", ""),
-      value: costs.filter((c) => c.agentId === agent.id).reduce((s, c) => s + c.costUsd, 0),
-      color: agent.avatarColor,
-    }))
-    .filter((d) => d.value > 0)
-    .sort((a, b) => b.value - a.value);
+  const openIncident = incidents.find((i) => !i.resolvedAt);
+  const recentIncidents = incidents.slice(0, 5);
+  const firstCheck = checks[0];
 
-  const statusCounts: Record<string, number> = {};
-  for (const r of runs) statusCounts[r.status] = (statusCounts[r.status] ?? 0) + 1;
-  const statusData = Object.entries(statusCounts).map(([status, value]) => ({
-    status,
-    value,
-  }));
+  if (loading) return <EmptyState label="Carregando dados de monitoramento…" />;
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-xl font-semibold text-white">Overview</h1>
-        <p className="mt-1 text-sm text-slate-400">
-          Live operational view of every autonomous agent run across your fleet.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h1 className="text-xl font-semibold text-white">Overview</h1>
+          <a
+            href={targetUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="mt-1 inline-flex items-center gap-1 text-sm text-sky-400 hover:text-sky-300"
+          >
+            {targetUrl} <ExternalLink size={12} />
+          </a>
+        </div>
+        <div className="flex items-center gap-3">
+          <StatusBadge status={currentStatus} large />
+          <Button onClick={checkNow} disabled={checking} variant="default">
+            <span className="flex items-center gap-1.5">
+              <RefreshCw size={14} className={checking ? "animate-spin" : ""} />
+              Verificar agora
+            </span>
+          </Button>
+        </div>
       </div>
+
+      {openIncident && (
+        <Card className="border-rose-500/30 bg-rose-500/10 p-4">
+          <p className="text-sm font-medium text-rose-200">
+            🔴 Site fora do ar desde {formatRelativeTime(openIncident.startedAt)}
+          </p>
+          <p className="mt-1 text-xs text-rose-300/80">
+            Causa: {openIncident.cause} · {openIncident.checksFailed} checagem(ns) falharam
+          </p>
+        </Card>
+      )}
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <StatCard
-          label="Active Runs"
-          value={String(activeRuns.length)}
-          delta={`${runs.length} total`}
+          label="Uptime 24h"
+          value={formatPercent(uptimePercent["24h"])}
+          icon={<Activity size={16} />}
+        />
+        <StatCard
+          label="Uptime 7d"
+          value={formatPercent(uptimePercent["7d"])}
+          icon={<TrendingUp size={16} />}
+        />
+        <StatCard
+          label="Uptime 30d"
+          value={formatPercent(uptimePercent["30d"])}
+          icon={<TrendingUp size={16} />}
+        />
+        <StatCard
+          label="Latência média"
+          value={formatMs(avgLatencyMs)}
+          delta={lastCheckedAt ? `última checagem ${formatRelativeTime(lastCheckedAt)}` : undefined}
           icon={<Clock size={16} />}
-        />
-        <StatCard
-          label="Success Rate"
-          value={`${successRate}%`}
-          delta={`${finished.length} completed`}
-          deltaTone={successRate >= 80 ? "positive" : "negative"}
-          icon={<ShieldCheck size={16} />}
-        />
-        <StatCard
-          label="Total Spend"
-          value={formatUsd(totalSpend)}
-          delta={`${costs.length} tool calls`}
-          icon={<DollarSign size={16} />}
-        />
-        <StatCard
-          label="Pending Approvals"
-          value={String(pendingApprovals.length)}
-          delta={pendingApprovals.length > 0 ? "Needs review" : "All clear"}
-          deltaTone={pendingApprovals.length > 0 ? "negative" : "positive"}
-          icon={<AlertTriangle size={16} />}
         />
       </div>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <Card className="lg:col-span-2">
-          <CardHeader title="Spend by agent" subtitle="Cumulative cost across all runs" />
-          <div className="h-56 px-2 py-3">
-            {costByAgent.length === 0 ? (
-              <EmptyState label="No spend recorded yet" />
-            ) : (
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={costByAgent} layout="vertical" margin={{ left: 8, right: 16 }}>
-                  <XAxis type="number" hide />
-                  <YAxis
-                    type="category"
-                    dataKey="name"
-                    width={140}
-                    tick={{ fill: "#94a3b8", fontSize: 12 }}
-                    axisLine={false}
-                    tickLine={false}
-                  />
-                  <Tooltip
-                    formatter={(v) => formatUsd(Number(v))}
-                    contentStyle={{
-                      background: "#0f1420",
-                      border: "1px solid rgba(255,255,255,0.1)",
-                      borderRadius: 8,
-                      fontSize: 12,
-                    }}
-                  />
-                  <Bar dataKey="value" radius={[0, 6, 6, 0]}>
-                    {costByAgent.map((d, i) => (
-                      <Cell key={i} fill={d.color} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            )}
-          </div>
-        </Card>
+      {firstCheck && (
+        <p className="text-xs text-slate-500">
+          Monitorando desde {formatRelativeTime(firstCheck.timestamp)} · {checks.length} checagens
+          registradas na janela retida em memória. Percentuais de 7d/30d refletem o histórico
+          disponível, não necessariamente o período completo.
+        </p>
+      )}
 
-        <Card>
-          <CardHeader title="Run status" subtitle={`${runs.length} runs total`} />
-          <div className="h-56 px-2 py-3">
+      <Card>
+        <CardHeader title="Latência" subtitle="Últimas 60 checagens" />
+        <div className="h-64 px-2 py-3">
+          {latencyData.length === 0 ? (
+            <EmptyState label="Nenhuma checagem registrada ainda" />
+          ) : (
             <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie
-                  data={statusData}
-                  dataKey="value"
-                  nameKey="status"
-                  innerRadius={45}
-                  outerRadius={70}
-                  paddingAngle={3}
-                >
-                  {statusData.map((d, i) => (
-                    <Cell key={i} fill={STATUS_COLORS[d.status] ?? "#64748b"} />
-                  ))}
-                </Pie>
+              <AreaChart data={latencyData}>
+                <defs>
+                  <linearGradient id="latencyGradient" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#38bdf8" stopOpacity={0.4} />
+                    <stop offset="100%" stopColor="#38bdf8" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid stroke="rgba(255,255,255,0.05)" vertical={false} />
+                <XAxis
+                  dataKey="time"
+                  tickFormatter={(v) => formatClockTime(v)}
+                  tick={{ fill: "#64748b", fontSize: 11 }}
+                  axisLine={false}
+                  tickLine={false}
+                  minTickGap={40}
+                />
+                <YAxis
+                  tickFormatter={(v) => `${v}ms`}
+                  tick={{ fill: "#64748b", fontSize: 11 }}
+                  axisLine={false}
+                  tickLine={false}
+                  width={50}
+                />
                 <Tooltip
+                  labelFormatter={(v) => formatClockTime(v as string)}
+                  formatter={(v) => [`${v}ms`, "latência"]}
                   contentStyle={{
                     background: "#0f1420",
                     border: "1px solid rgba(255,255,255,0.1)",
@@ -164,109 +155,51 @@ export default function OverviewPage() {
                     fontSize: 12,
                   }}
                 />
-              </PieChart>
+                <Area
+                  type="monotone"
+                  dataKey="latency"
+                  stroke="#38bdf8"
+                  fill="url(#latencyGradient)"
+                  strokeWidth={2}
+                />
+              </AreaChart>
             </ResponsiveContainer>
-          </div>
-        </Card>
-      </div>
-
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <Card className="lg:col-span-2">
-          <CardHeader
-            title="Recent runs"
-            subtitle="Latest agent executions"
-            action={
-              <Link href="/runs" className="text-xs font-medium text-sky-400 hover:text-sky-300">
-                View all →
-              </Link>
-            }
-          />
-          <div className="divide-y divide-white/5">
-            {runs.slice(0, 6).map((run) => {
-              const agent = agents.find((a) => a.id === run.agentId);
-              return (
-                <Link
-                  key={run.id}
-                  href={`/runs/${run.id}`}
-                  className="flex items-center justify-between gap-3 px-4 py-3 text-sm hover:bg-white/5"
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span
-                        className="h-2 w-2 shrink-0 rounded-full"
-                        style={{ background: agent?.avatarColor }}
-                      />
-                      <span className="truncate text-slate-200">{run.task}</span>
-                    </div>
-                    <p className="mt-0.5 truncate text-xs text-slate-500">
-                      {agent?.name} · {formatRelativeTime(run.startedAt)}
-                    </p>
-                  </div>
-                  <StatusBadge status={run.status} />
-                </Link>
-              );
-            })}
-            {runs.length === 0 && <EmptyState label="No runs yet" />}
-          </div>
-        </Card>
-
-        <Card>
-          <CardHeader
-            title="Pending approvals"
-            action={
-              <Link href="/approvals" className="text-xs font-medium text-sky-400 hover:text-sky-300">
-                View all →
-              </Link>
-            }
-          />
-          <div className="divide-y divide-white/5">
-            {pendingApprovals.slice(0, 4).map((approval) => (
-              <div key={approval.id} className="px-4 py-3">
-                <div className="flex items-center justify-between gap-2">
-                  <p className="text-sm text-slate-200">{approval.action}</p>
-                  <RiskBadge risk={approval.riskLevel} />
-                </div>
-                <p className="mt-1 text-xs text-slate-500">{approval.reason}</p>
-                <div className="mt-2 flex gap-2">
-                  <Button size="sm" variant="success" onClick={() => decideApproval(approval.id, "approved")}>
-                    Approve
-                  </Button>
-                  <Button size="sm" variant="danger" onClick={() => decideApproval(approval.id, "denied")}>
-                    Deny
-                  </Button>
-                </div>
-              </div>
-            ))}
-            {pendingApprovals.length === 0 && <EmptyState label="No pending approvals" />}
-          </div>
-        </Card>
-      </div>
+          )}
+        </div>
+      </Card>
 
       <Card>
         <CardHeader
-          title="Recent errors"
-          subtitle="Most recent failures across all runs"
+          title="Incidentes recentes"
+          subtitle={`${incidents.length} no total`}
           action={
-            <Link href="/errors" className="text-xs font-medium text-sky-400 hover:text-sky-300">
-              View all →
+            <Link href="/history" className="text-xs font-medium text-sky-400 hover:text-sky-300">
+              Ver histórico completo →
             </Link>
           }
         />
         <div className="divide-y divide-white/5">
-          {recentErrors.map((error) => (
-            <div key={error.id} className="flex items-center justify-between gap-3 px-4 py-2.5 text-sm">
+          {recentIncidents.map((incident) => (
+            <div key={incident.id} className="flex items-center justify-between gap-3 px-4 py-3 text-sm">
               <div className="min-w-0">
-                <p className="truncate text-rose-300">{error.message}</p>
+                <p className="truncate text-rose-300">{incident.cause}</p>
                 <p className="text-xs text-slate-500">
-                  attempt {error.retryAttempt} · {formatRelativeTime(error.timestamp)}
+                  {formatRelativeTime(incident.startedAt)}
+                  {incident.resolvedAt
+                    ? ` · durou ${formatDuration(incident.startedAt, incident.resolvedAt)}`
+                    : " · em andamento"}
                 </p>
               </div>
-              <Link href={`/runs/${error.runId}`} className="shrink-0 text-xs text-sky-400 hover:text-sky-300">
-                View run
-              </Link>
+              <span
+                className={
+                  incident.resolvedAt ? "text-xs text-emerald-400" : "text-xs text-rose-400"
+                }
+              >
+                {incident.resolvedAt ? "Resolvido" : "Ativo"}
+              </span>
             </div>
           ))}
-          {recentErrors.length === 0 && <EmptyState label="No errors recorded" />}
+          {recentIncidents.length === 0 && <EmptyState label="Nenhum incidente registrado 🎉" />}
         </div>
       </Card>
     </div>
